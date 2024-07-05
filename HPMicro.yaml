@@ -16,7 +16,7 @@ variants:
       - !Ram
         name: DLM0
         range:
-          start: 0x80000
+          start: 0x62000
           end: 0xa0000
         cores:
           - core0

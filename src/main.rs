@@ -1,40 +1,30 @@
 #![no_main]
 #![no_std]
 #![feature(type_alias_impl_trait)]
-
+#![warn(dead_code)]
 extern crate alloc;
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
-use embassy_executor::Spawner;
-use core::cell::RefCell;
 
-use ::slint::platform::software_renderer::MinimalSoftwareWindow;
 use defmt::info;
 use embedded_alloc::Heap;
 use embedded_graphics::draw_target::DrawTarget;
-// use embedded_graphics::geometry::{Dimensions, Point, Size};
-// use embedded_graphics::image::{Image, ImageRawLE};
-// use embedded_graphics::mono_font::ascii::FONT_10X20;
-// use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::pixelcolor::{Rgb565, RgbColor};
-use embedded_hal::delay::DelayNs;
-// use embedded_graphics::primitives::Rectangle;
-// use embedded_graphics::text::Text;
-// use embedded_graphics::transform::Transform;
-// use embedded_graphics::Drawable;
+use ft6236::FT6236;
 use hpm_hal::gpio::{Level, Output, Speed};
 use hpm_hal::mode::Blocking;
 use hpm_hal::spi::{Config, Spi, Timings, MODE_0};
 use hpm_hal::time::Hertz;
 use riscv::delay::McycleDelay;
 use rm67162::RM67162;
-use slint::Model as _;
+use slint::{LogicalPosition, Model as _};
 use {defmt_rtt as _, hpm_hal as hal};
 
 use crate::slint_ui::*;
 
+mod ft6236;
 mod rm67162;
 mod slint_ui;
 struct PrinterQueueData {
@@ -56,32 +46,47 @@ impl PrinterQueueData {
     }
 }
 
-const HEAP_SIZE: usize = 10 * 1024;
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 #[global_allocator]
-static ALLOCATOR: Heap = Heap::empty();
+static HEAP: Heap = Heap::empty();
+
 // #[hal::entry]
 // fn main() -> ! {
 #[embassy_executor::main]
-async fn main(spawner: Spawner) {
+async fn main(_spawner: embassy_executor::Spawner) {
     let p = hal::init(Default::default());
 
-    // Initialize heap
-    unsafe { ALLOCATOR.init(core::ptr::addr_of_mut!(HEAP) as usize, HEAP_SIZE) }
+    // Initialize the allocator BEFORE you use it
+    {
+        use core::mem::MaybeUninit;
+        const HEAP_SIZE: usize = 170 * 1024;
+        static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
+        unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE) }
+    }
 
-    // let mut delay = McycleDelay::new(hal::sysctl::clocks().cpu0.0);
+    // Initialize a window (we'll need it later).
+    let window = slint::platform::software_renderer::MinimalSoftwareWindow::new(
+        slint::platform::software_renderer::RepaintBufferType::ReusedBuffer,
+    );
+
+    slint::platform::set_platform(Box::new(MyPlatform { window: window.clone() })).unwrap();
+
+    // Make sure the window covers our entire screen.
+    // window.set_size(slint::PhysicalSize::new(600, 450));
+    window.set_size(slint::PhysicalSize::new(536, 240));
+
+    let mut delay = McycleDelay::new(hal::sysctl::clocks().cpu0.0);
     defmt::info!("Board init!");
 
     let mut rst = Output::new(p.PA09, Level::High, Speed::Fast);
+
+    // let mut pwr_en = Output::new(p.PB15, Level::High, Speed::Fast);
+    // pwr_en.set_high();
 
     let mut im = Output::new(p.PB12, Level::High, Speed::Fast);
     im.set_high();
 
     let mut iovcc = Output::new(p.PB13, Level::High, Speed::Fast);
     iovcc.set_high();
-
-    // PA10
-    let mut led = Output::new(p.PA10, Level::Low, Speed::Fast);
 
     let spi_config = Config {
         frequency: Hertz(40_000_000),
@@ -97,7 +102,6 @@ async fn main(spawner: Spawner) {
         Spi::new_blocking_quad(p.SPI1, p.PA26, p.PA27, p.PA29, p.PA28, p.PA30, p.PA31, spi_config);
 
     let mut display = RM67162::new(spi);
-    let mut delay = embassy_time::Delay;
     display.reset(&mut rst, &mut delay).unwrap();
     info!("reset display");
     if let Err(e) = display.init(&mut delay) {
@@ -110,20 +114,13 @@ async fn main(spawner: Spawner) {
         // panic!("Error: {:?}", e);
     }
 
-    let window = MinimalSoftwareWindow::new(Default::default());
-    slint::platform::set_platform(Box::new(slint_ui::MyPlatform {
-        window: window.clone(),
-        display: RefCell::new(display),
-        line_buffer: RefCell::new([slint::platform::software_renderer::Rgb565Pixel(0); 536]),
-    }))
-    .unwrap();
-
-    // Setup the UI.
-    // let _ui = MainWindow::new();
-    // ... setup callback and properties on `ui` ...
-
-    // Make sure the window covers our entire screen.
-    window.set_size(slint::PhysicalSize::new(536, 240));
+    // Touch driver
+    let i2c_config = hal::i2c::Config::default();
+    let i2c = hal::i2c::I2c::new_blocking(p.I2C2, p.PB08, p.PB09, i2c_config);
+    let mut touch = FT6236::new_with_addr(i2c, 0x38);
+    let mut tp_rst = Output::new(p.PB14, Level::High, Speed::Fast);
+    touch.reset(&mut tp_rst, &mut embassy_time::Delay).unwrap();
+    touch.init(ft6236::Config::default()).unwrap();
 
     info!("window set");
     let main_window = MainWindow::new().unwrap();
@@ -202,12 +199,77 @@ async fn main(spawner: Spawner) {
         },
     );
 
-    info!("main window");
-    main_window.run().unwrap();
+    let mut led = Output::new(p.PA10, Level::Low, Speed::Fast);
+    let mut line_buffer = [slint::platform::software_renderer::Rgb565Pixel::default(); 536];
+    // let mut line_buffer = [slint::platform::software_renderer::Rgb565Pixel::default(); 600];
+    let mut released_cycles = 0;
 
+    info!("Starting event loop");
     loop {
+        // Let Slint run the timer hooks and update animations.
+        slint::platform::update_timers_and_animations();
+
+        // Check the touch screen or input device using your driver.
+        if let Ok(Some(mut point)) = touch.get_point0() {
+            // Create event
+            released_cycles = 0;
+            let x = point.x;
+            point.x = point.y;
+            point.y = 240 - x;
+            info!("Point: {:?}", point);
+            let e = match point.event {
+                ft6236::EventType::PressDown => slint::platform::WindowEvent::PointerPressed {
+                    position: LogicalPosition {
+                        x: point.x as f32,
+                        y: point.y as f32,
+                    },
+                    button: slint::platform::PointerEventButton::Left,
+                },
+                ft6236::EventType::LiftUp => slint::platform::WindowEvent::PointerReleased {
+                    position: LogicalPosition {
+                        x: point.x as f32,
+                        y: point.y as f32,
+                    },
+                    button: slint::platform::PointerEventButton::Left,
+                },
+                ft6236::EventType::Contact => slint::platform::WindowEvent::PointerMoved {
+                    position: LogicalPosition {
+                        x: point.x as f32,
+                        y: point.y as f32,
+                    },
+                },
+            };
+            window.dispatch_event(e);
+        } else {
+            released_cycles += 1;
+            if released_cycles > 100 {
+                window.dispatch_event(slint::platform::WindowEvent::PointerReleased {
+                    position: LogicalPosition { x: 0_f32, y: 0_f32 },
+                    button: slint::platform::PointerEventButton::Left,
+                });
+
+                window.dispatch_event(slint::platform::WindowEvent::PointerExited);
+            }
+        };
+
+        // Draw the scene if something needs to be drawn.
+        window.draw_if_needed(|renderer| {
+            // Use single line buffer
+            renderer.render_by_line(DisplayWrapper {
+                display: &mut display,
+                line_buffer: &mut line_buffer,
+            });
+        });
+
+        // Try to put the MCU to sleep
+        if !window.has_active_animations() {
+            if let Some(duration) = slint::platform::duration_until_next_timer_update() {
+                // embassy_time::Timer::after_millis(duration.as_millis() as u64).await;
+                continue;
+            }
+        }
         led.toggle();
-        embassy_time::Timer::after_secs(1).await
+        // embassy_time::Timer::after_millis(1).await;
     }
 }
 

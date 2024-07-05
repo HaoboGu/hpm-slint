@@ -2,8 +2,9 @@ MEMORY
 {
     XPI0_HEADER : ORIGIN = 0x80000000, LENGTH = 0x3000 /* bootheader */
     XPI0_APP    : ORIGIN = 0x80003000, LENGTH = 1024K - 0x3000 /* app firmware */
-    DLM0        : ORIGIN = 0x00080000, LENGTH =  128K /* data local memory */
-    ILM0        : ORIGIN = 0x00000000, LENGTH =  128K /* instruction local memory */
+    /* DLM0        : ORIGIN = 0x00080000, LENGTH =  128K data local memory */
+    ILM0        : ORIGIN = 0x00000000, LENGTH =  8K /* instruction local memory */
+    DLM0        : ORIGIN = 0x00062000, LENGTH =  256K - 8K /* data local memory */
     AHB_SRAM    : ORIGIN = 0xf0400000, LENGTH =   32K
 }
 REGION_ALIAS("REGION_TEXT", XPI0_APP);

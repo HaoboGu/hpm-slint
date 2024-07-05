@@ -1,5 +1,3 @@
-use core::arch::asm;
-
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::geometry::Size;
 use embedded_graphics::pixelcolor::raw::ToBytes;
@@ -12,6 +10,7 @@ use embedded_hal::digital::OutputPin;
 use hpm_hal::mode::Blocking;
 use hpm_hal::spi::{AddrLen, AddrPhaseFormat, DataPhaseFormat, Error, Spi, TransMode, TransferConfig};
 
+#[allow(unused)]
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Orientation {
     Portrait,
@@ -41,7 +40,7 @@ impl RM67162<'_> {
     pub fn new<'a>(qspi: Spi<'a, Blocking>) -> RM67162<'a> {
         RM67162 {
             qspi,
-            orientation: Orientation::LandscapeFlipped,
+            orientation: Orientation::Landscape,
         }
     }
 
@@ -74,8 +73,6 @@ impl RM67162<'_> {
 
         if data.len() == 0 {
             transfer_config.transfer_mode = TransMode::NO_DATA;
-            // transfer_config.addr = Some(cmd);
-            // transfer_config.addr_len = AddrLen::_16BIT;
             self.qspi.blocking_write::<u8>(&[], &transfer_config)?;
         } else {
             self.qspi.blocking_write(data, &transfer_config)?;
@@ -108,25 +105,30 @@ impl RM67162<'_> {
 
     /// rm67162_qspi_init
     pub fn init(&mut self, delay: &mut impl embedded_hal::delay::DelayNs) -> Result<(), Error> {
-        defmt::info!("1");
-        self.send_cmd(0x11, &[])?; // sleep out
-        delay.delay_ms(120);
+        // RM690B0
+        // self.send_cmd(0xFE, &[0x20])?; // Set page
+        // self.send_cmd(0x26, &[0x0A])?; // MIPI OFF
+        // self.send_cmd(0x24, &[0x80])?; // SPI write RAM
+        // // self.send_cmd(0x5A, &[0x51])?; //! 230918:SWIRE FOR BV6804
+        // // self.send_cmd(0x5B, &[0x2E])?; //! 230918:SWIRE FOR BV6804
+        // self.send_cmd(0xFE, &[0x00])?; // Set Page
 
-        defmt::info!("1");
+        // delay.delay_ms(10);
+
+        self.send_cmd(0x11, &[])?; // sleep out
+
+        self.send_cmd(0x34, &[0x00])?; // TE OFF
+
+        delay.delay_ms(120);
+        self.send_cmd(0x51, &[0x00])?; // write brightness
+
         self.send_cmd(0x3A, &[0x55])?; // 16bit mode
 
-        defmt::info!("1");
-        self.send_cmd(0x51, &[0xD0])?; // write brightness
-
-        defmt::info!("1");
         self.send_cmd(0x29, &[])?; // display on
-        defmt::info!("wait display n");
         delay.delay_ms(120);
 
-        defmt::info!("display on");
         self.send_cmd(0x51, &[0xD0])?; // write brightness
 
-        defmt::info!("set ori");
         self.set_orientation(self.orientation)?;
         Ok(())
     }
@@ -172,7 +174,8 @@ impl RM67162<'_> {
     fn fill_color(&mut self, x: u16, y: u16, w: u16, h: u16, color: Rgb565) -> Result<(), Error> {
         self.set_address(x, y, x + w - 1, y + h - 1)?;
 
-        let mut buffer: [u8; 536 * 240] = [0; 536 * 240];
+        // Line buffer
+        let mut buffer: [u8; 536 * 24] = [0; 536 * 24];
         let total_size = (w as usize) * (h as usize);
         let mut i: usize = 0;
         let mut buffer_idx = 0;
@@ -211,8 +214,10 @@ impl OriginDimensions for RM67162<'_> {
     fn size(&self) -> Size {
         if matches!(self.orientation, Orientation::Landscape | Orientation::LandscapeFlipped) {
             Size::new(536, 240)
+            // Size::new(600, 450)
         } else {
             Size::new(240, 536)
+            // Size::new(450, 600)
         }
     }
 }
